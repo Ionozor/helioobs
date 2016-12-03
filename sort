@@ -1,0 +1,30 @@
+#!/usr/bin/env python
+
+import sys
+import time
+from datetime import datetime
+
+ofile = None
+ofn = ''
+
+while True:
+	line = sys.stdin.readline()
+
+	if not line:
+		break
+
+	try:
+		t = float(line.split()[0])
+	except IndexError, ValueError:
+		continue
+
+	fn = datetime.utcfromtimestamp(t).strftime("%Y%m%d")
+
+	if ofn != fn:
+		if ofile is not None:
+			ofile.close()
+		ofn = fn
+		ofile = open(fn, 'a')
+
+	ofile.write(line)
+	ofile.flush()

@@ -1,0 +1,40 @@
+<html>
+<head>
+	<meta charset="UTF-8">
+	<title>Sluncárna, šum na 32 MHz</title>
+	<script src="plotly-latest.min.js"></script>
+	<script src='nprogress.js'></script>
+	<link rel='stylesheet' href='nprogress.css'/>
+</head>
+<body>
+	<div id="plot" style="width: 100%;height: 100%;"></div>
+
+	<script>
+		NProgress.start();
+		Plotly.d3.text("/log/all", function(text) {
+			try {
+  				rows = Plotly.d3.tsv.parseRows(text);
+
+  				var x = [], y = [];
+
+  				for (var i = 0; i < rows.length; i++) {
+	  				x.push(new Date(parseFloat(rows[i][1])*1000));
+  					y.push(rows[i][2]);
+  				}
+
+  				var plotDiv = document.getElementById("plot");
+
+  				Plotly.newPlot(plotDiv, [{
+  						x: x,
+  						y: y
+  					}], {
+  						title: 'Úroveň šumu na ~30 MHz, sluncárna'
+  					});
+  				NProgress.done();
+  			} catch (err) {
+  				NProgress.done();
+  			}
+  		});
+	</script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+#!/usr/bin/env python
+
+from __future__ import print_function
+
+import argparse
+import numpy as np
+from pymlab import config
+import alsaaudio as alsa
+import math
+import time
+
+from multiprocessing.dummy import Pool
+from cStringIO import StringIO
+
+
+class FifoFileBuffer(object):
+    def __init__(self):
+        self.buf = StringIO()
+        self.available = 0    # Bytes available for reading
+        self.size = 0
+        self.write_fp = 0
+
+    def read(self, size = None):
+        """Reads size bytes from buffer"""
+        if size is None or size > self.available:
+            size = self.available
+        size = max(size, 0)
+
+        result = self.buf.read(size)
+        self.available -= size
+
+        if len(result) < size:
+            self.buf.seek(0)
+            result += self.buf.read(size - len(result))
+
+        return result
+
+    def write(self, data):
+        """Appends data to buffer"""
+        if self.size < self.available + len(data):
+            # Expand buffer
+            new_buf = StringIO()
+            new_buf.write(self.read())
+            self.write_fp = self.available = new_buf.tell()
+            read_fp = 0
+            while self.size <= self.available + len(data):
+                self.size = max(self.size, 1024) * 2
+            new_buf.write('0' * (self.size - self.write_fp))
+            self.buf = new_buf
+        else:
+            read_fp = self.buf.tell()
+
+        self.buf.seek(self.write_fp)
+        written = self.size - self.write_fp
+        self.buf.write(data[:written])
+        self.write_fp += len(data)
+        self.available += len(data)
+        if written < len(data):
+            self.write_fp -= self.size
+            self.buf.seek(0)
+            self.buf.write(data[written:])
+        self.buf.seek(read_fp)
+
+
+def reduce(a, div=4, start=1, stop=3):
+    return np.sum(np.sort(a, axis=0)[len(a)*start/div:len(a)*stop/div], axis=0)
+
+def wrap_alsa_input(inp):
+    fifo = FifoFileBuffer()
+
+    def read_nbytes(nbytes):
+        while nbytes > fifo.available:
+            l, data = inp.read()
+
+            if l == 0:
+                time.sleep(0.001)
+
+            fifo.write(data)
+
+        return fifo.read(nbytes)
+
+    return read_nbytes
+
+def read_smps(inp, nsamples, format=np.float32):
+    inpbuf = np.fromstring(inp(np.dtype(format).itemsize * 2 * nsamples), dtype=format).astype(np.complex64)
+    return inpbuf[0:nsamples * 2:2] + inpbuf[1:nsamples * 2:2].astype(np.complex64) * 1j
+
+def waterfallize(signal, nbins):
+    window = 0.5 * (1.0 - np.cos((2 * math.pi * np.arange(nbins)) / nbins))
+    nrows = len(signal) / nbins
+    img = np.multiply(np.reshape(signal[0:nrows * nbins], (nrows, nbins)), window)
+    wf = np.log(np.abs(np.fft.fft(img)))
+    return np.concatenate((wf[:, nbins / 2:nbins], wf[:, 0:nbins / 2]), axis=1)
+
+formats = {
+    'short': (np.int16, alsa.PCM_FORMAT_S16_LE),
+    'float': (np.float32, alsa.PCM_FORMAT_FLOAT_LE)
+}
+
+def main():
+    parser = argparse.ArgumentParser(description='')
+    parser.add_argument('filename', type=str,
+                        help='')
+    parser.add_argument('-d', '--device', type=str, default='default',
+                        help='name of the ALSA input device')
+    parser.add_argument('-b', '--bins', type=int, default=4096,
+                        help='number of frequency bins to use in processing (default: %(default)s)')
+    args = parser.parse_args()
+
+    card = args.device
+    format = formats['short']
+    freqs = [29200000, 29300000, 29400000, 29500000, 29600000, 29700000, 29800000]
+    filename_prefix = 'stuff'
+    smp_rate = 48000
+
+    nbins = args.bins
+    freq_set_wait = 1.0
+    nmeasure_smps = nbins * 32
+
+    files = [file("%s_%d" % (args.filename, freq), 'w') for freq in freqs]
+
+    cfg = config.Config(
+        port = 0,
+        bus = [
+            {
+                "type": "i2chub",
+                "address": 0x70,
+                "children": [
+                    { "name":"clkgen", "type":"clkgen01", "channel": 5, },
+                ],
+            },
+        ],
+    )
+    cfg.initialize()
+    fgen = cfg.get_device('clkgen')
+    fgen.reset()
+    time.sleep(3)
+    fgen = cfg.get_device('clkgen')
+    fgen.recall_nvm()
+
+    inp = alsa.PCM(alsa.PCM_CAPTURE, alsa.PCM_NONBLOCK, card)
+    inp.setchannels(2)
+    inp.setrate(smp_rate)
+    inp.setformat(format[1]) # alsa.PCM_FORMAT_S16_LE
+    inp.setperiodsize(160)
+
+    inp = wrap_alsa_input(inp)
+
+    pool = Pool(1)
+
+    while True:
+        for freq, fil in zip(freqs, files):
+            print("setting freq %d" % freq)
+            fgen.recall_nvm()
+            read_smps(inp, int(0.5 * smp_rate), format=format[0])
+            fgen.set_freq(10., float(freq) * 2 / 1000000)
+            read_smps(inp, int(2.0 * smp_rate), format=format[0])
+
+            read_smps(inp, int(freq_set_wait * smp_rate), format=format[0])
+
+            smps = read_smps(inp, int(nmeasure_smps), format=format[0])
+            stamp = time.time()
+
+            def comp(fil, stamp, smps):
+                wf = waterfallize(smps, nbins)
+                return (fil, stamp, reduce(reduce(wf)))
+            def cb(res):
+                res[0].write("\t%f\t%f\n" % (res[1], res[2]))
+            pool.apply_async(comp, (fil, stamp, smps), callback=cb)
+
+
+if __name__ == "__main__":
+    main()
+
