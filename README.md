@@ -1,1 +1,2 @@
-# helioobs
+# HF radio observing suite - Helioobs
+
